@@ -11,8 +11,10 @@ import {
   CountTokensParameters,
   EmbedContentResponse,
   EmbedContentParameters,
+  Tool,
 } from '@google/genai';
 import { ContentGenerator } from './contentGenerator.js';
+import { writeFileSync } from 'fs';
 
 /**
  * ContentGenerator implementation for local LLM using OpenAI-compatible API
@@ -32,9 +34,27 @@ export class LocalLLMContentGenerator implements ContentGenerator {
     this.apiKey = config.apiKey;
   }
 
+  private logToFile(message: string) {
+    try {
+      const timestamp = new Date().toISOString();
+      const logMessage = `[${timestamp}] ${message}\n`;
+      writeFileSync('/tmp/local-llm-debug.log', logMessage, { flag: 'a' });
+    } catch (error) {
+      // Ignore file write errors
+    }
+  }
+
   async generateContent(
     request: GenerateContentParameters,
   ): Promise<GenerateContentResponse> {
+    console.error('\n===========================================');
+    console.error('🚀 LOCAL LLM GENERATECONTENT CALLED');
+    console.error('🚀 Request has tools:', !!request.config?.tools);
+    console.error('===========================================\n');
+
+    this.logToFile('LOCAL LLM GENERATECONTENT CALLED');
+    this.logToFile(`Request has tools: ${!!request.config?.tools}`);
+
     const openaiRequest = this.convertToOpenAIFormat(request);
 
     const headers: Record<string, string> = {
@@ -46,7 +66,7 @@ export class LocalLLMContentGenerator implements ContentGenerator {
     }
 
     try {
-      console.log('🔗 Making request to local LLM:', this.endpoint);
+      console.error('🔗 Making request to local LLM:', this.endpoint);
       const response = await fetch(`${this.endpoint}/chat/completions`, {
         method: 'POST',
         headers,
@@ -146,7 +166,47 @@ export class LocalLLMContentGenerator implements ContentGenerator {
     const text = choice.message?.content || '';
     const finishReason = choice.finish_reason || 'stop';
 
-    // Use type assertion to match Google's expected format
+    // Check if this is a function call
+    const toolCalls = choice.message?.tool_calls;
+
+    if (toolCalls && toolCalls.length > 0) {
+      console.log('🔧 Function call detected:', toolCalls[0].function?.name);
+      console.log('🔧 Function args:', toolCalls[0].function?.arguments);
+
+      // Handle function call response
+      const functionCall = toolCalls[0];
+      const functionCallPart = {
+        functionCall: {
+          name: functionCall.function?.name,
+          args: JSON.parse(functionCall.function?.arguments || '{}')
+        }
+      };
+
+      return {
+        candidates: [
+          {
+            content: {
+              parts: text ? [{ text }, functionCallPart] : [functionCallPart],
+              role: 'model',
+            },
+            finishReason: 'STOP', // Function calls always finish to allow execution
+            index: 0,
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: openaiResponse.usage?.prompt_tokens || 0,
+          candidatesTokenCount: openaiResponse.usage?.completion_tokens || 0,
+          totalTokenCount: openaiResponse.usage?.total_tokens || 0,
+        },
+        text: text,
+        data: undefined,
+        functionCalls: [functionCallPart.functionCall],
+        executableCode: undefined,
+        codeExecutionResult: undefined,
+      } as unknown as GenerateContentResponse;
+    }
+
+    // Regular text response
     return {
       candidates: [
         {
@@ -154,7 +214,7 @@ export class LocalLLMContentGenerator implements ContentGenerator {
             parts: [{ text }],
             role: 'model',
           },
-          finishReason: finishReason.toUpperCase(), // Convert 'stop' to 'STOP'
+          finishReason: finishReason.toUpperCase(),
           index: 0,
         },
       ],
@@ -163,7 +223,6 @@ export class LocalLLMContentGenerator implements ContentGenerator {
         candidatesTokenCount: openaiResponse.usage?.completion_tokens || 0,
         totalTokenCount: openaiResponse.usage?.total_tokens || 0,
       },
-      // Add the missing properties to satisfy the type
       text: text,
       data: undefined,
       functionCalls: [],
@@ -194,6 +253,71 @@ export class LocalLLMContentGenerator implements ContentGenerator {
     }
 
     return '';
+  }
+
+  private convertToolsToOpenAIFormat(geminiTools: any[]): any[] {
+    const openaiTools: any[] = [];
+
+    for (const tool of geminiTools) {
+      if (tool.functionDeclarations) {
+        for (const func of tool.functionDeclarations) {
+          // Simplify the parameters structure for better compatibility
+          const parameters = {
+            type: 'object',
+            properties: {},
+            required: []
+          };
+
+          // Copy properties if they exist
+          if (func.parameters && func.parameters.properties) {
+            parameters.properties = func.parameters.properties;
+          }
+          if (func.parameters && func.parameters.required) {
+            parameters.required = func.parameters.required;
+          }
+
+          openaiTools.push({
+            type: 'function',
+            function: {
+              name: func.name,
+              description: func.description || `Execute ${func.name}`,
+              parameters: parameters
+            }
+          });
+        }
+      }
+    }
+
+    return openaiTools;
+  }
+
+  private extractFunctionCall(parts: any[]): any | null {
+    for (const part of parts) {
+      if (part.functionCall) {
+        const callId = `call_${Math.random().toString(36).substr(2, 9)}`;
+        return {
+          id: callId,
+          type: 'function',
+          function: {
+            name: part.functionCall.name,
+            arguments: JSON.stringify(part.functionCall.args || {})
+          }
+        };
+      }
+    }
+    return null;
+  }
+
+  private extractFunctionResult(parts: any[]): any | null {
+    for (const part of parts) {
+      if (part.functionResponse) {
+        return {
+          id: part.functionResponse.name || `call_${Math.random().toString(36).substr(2, 9)}`,
+          result: JSON.stringify(part.functionResponse.response || {})
+        };
+      }
+    }
+    return null;
   }
 }
 
