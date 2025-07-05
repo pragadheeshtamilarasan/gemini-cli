@@ -16,6 +16,7 @@ import {
 import { createCodeAssistContentGenerator } from '../code_assist/codeAssist.js';
 import { DEFAULT_GEMINI_MODEL } from '../config/models.js';
 import { getEffectiveModel } from './modelCheck.js';
+import { createLocalLLMContentGenerator } from './localLLMContentGenerator.js';
 
 /**
  * Interface abstracting the core functionalities for generating content and counting tokens.
@@ -38,6 +39,7 @@ export enum AuthType {
   LOGIN_WITH_GOOGLE = 'oauth-personal',
   USE_GEMINI = 'gemini-api-key',
   USE_VERTEX_AI = 'vertex-ai',
+  USE_LOCAL_LLM = 'local-llm',
 }
 
 export type ContentGeneratorConfig = {
@@ -59,6 +61,13 @@ export async function createContentGeneratorConfig(
 
   // Use runtime model from config if available, otherwise fallback to parameter or default
   const effectiveModel = config?.getModel?.() || model || DEFAULT_GEMINI_MODEL;
+
+  if (process.env.USE_LOCAL_LLM === 'true') {
+    return {
+      model: effectiveModel,
+      authType: AuthType.USE_LOCAL_LLM,
+    };
+  }
 
   const contentGeneratorConfig: ContentGeneratorConfig = {
     model: effectiveModel,
@@ -128,6 +137,14 @@ export async function createContentGenerator(
     });
 
     return googleGenAI.models;
+  }
+
+  if (config.authType === AuthType.USE_LOCAL_LLM) {
+    return createLocalLLMContentGenerator({
+      endpoint: process.env.LLM_URL || 'http://localhost:3000',
+      model: process.env.LLM_MODEL || config.model,
+      apiKey: process.env.LLM_API_KEY,
+    });
   }
 
   throw new Error(
